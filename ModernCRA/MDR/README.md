@@ -10,6 +10,7 @@ This folder contains tools for conducting cyber risk assessments using Managed D
 |------|-------------|
 | `s1_query_runner.py` | Automated SentinelOne (S1) data collection script |
 | `CS_query_runner.py` | Automated CrowdStrike (CS) data collection script |
+| `cortex_query_runner.py` | Automated Palo Alto Cortex XDR data collection script |
 | `s1queries.txt` | Manual SentinelOne query reference (Deep Visibility) |
 | `AnalysisPrompt.txt` | AI prompt template for generating assessment reports |
 
@@ -36,6 +37,17 @@ python CS_query_runner.py \
     --base-url https://api.crowdstrike.com \
     --days 90 \
     --output ./cs_assessment_output
+```
+
+### Palo Alto Cortex XDR
+
+```bash
+python cortex_query_runner.py \
+    --fqdn YOUR-TENANT.xdr.us.paloaltonetworks.com \
+    --api-key YOUR_API_KEY \
+    --api-key-id YOUR_API_KEY_ID \
+    --days 90 \
+    --output ./cortex_assessment_output
 ```
 
 ---
@@ -129,6 +141,68 @@ python CS_query_runner.py \
     --base-url https://api.eu-1.crowdstrike.com \
     --output ./acme_assessment_may2026
 ```
+
+---
+
+### Cortex XDR Query Runner
+
+The `cortex_query_runner.py` script automates data collection from Cortex XDR via the public REST API. Event queries are XQL run against the `xdr_data` dataset using the async start → poll → fetch pattern, with the streaming endpoint used automatically for result sets over 1,000 rows.
+
+#### Command Line Options
+
+| Option | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `--fqdn` | ✅ | — | Tenant FQDN (e.g. `acme.xdr.us.paloaltonetworks.com`). `https://api-` is added; a value starting `api-` or `http(s)://` is used as given |
+| `--api-key` | ✅* | `$CORTEX_API_KEY` | API key |
+| `--api-key-id` | ✅* | `$CORTEX_API_KEY_ID` | API key ID |
+| `--auth-type` | ❌ | `standard` | `standard` or `advanced` — must match how the key was created |
+| `--days` | ❌ | 90 | Look-back window (if dates not specified) |
+| `--from-date` | ❌ | — | Query start (ISO-8601 UTC) |
+| `--to-date` | ❌ | — | Query end (ISO-8601 UTC) |
+| `--output` | ❌ | `./cortex_assessment_output` | Output directory |
+| `--only` | ❌ | all | Comma-separated output file names to collect, e.g. `Beacons.csv,RmmUse.csv` |
+
+\* Required, either as an option or from the environment variable. Prefer the environment variables so the key stays out of the shell history and process list.
+
+#### Examples
+
+```bash
+# Last 90 days, standard key
+python cortex_query_runner.py \
+    --fqdn acme.xdr.us.paloaltonetworks.com \
+    --api-key YOUR_API_KEY --api-key-id YOUR_API_KEY_ID
+
+# Advanced key, credentials from the environment, specific window
+export CORTEX_API_KEY=YOUR_API_KEY CORTEX_API_KEY_ID=YOUR_API_KEY_ID
+python cortex_query_runner.py \
+    --fqdn acme.xdr.us.paloaltonetworks.com \
+    --auth-type advanced \
+    --from-date 2026-02-25T00:00:00Z \
+    --to-date 2026-05-25T23:59:59Z
+
+# Re-run only some outputs over a shorter window
+python cortex_query_runner.py \
+    --fqdn acme.xdr.us.paloaltonetworks.com \
+    --only Beacons.csv,RmmUse.csv --days 30
+```
+
+#### Differences from the S1 and CS Runners
+
+The output files use the same names so `AnalysisPrompt.txt` applies unchanged, but Cortex XDR does not record identical data, so some queries are approximations. These are stated in each query's description in the CoC manifest and in the source comments:
+
+| Output | Cortex approach |
+|--------|-----------------|
+| `UPPCount.csv`, `UPPActivity.csv` | Process-start activity per user per host. Logon events need Windows Event Log collection, which is not on by default |
+| `CredentialTheft.csv` | Credential-dumping command lines (mimikatz, comsvcs MiniDump, `reg save sam`, ntdsutil…). Raw LSASS handle opens are not matched |
+| `BackdoorsIn.csv` | Inbound direction is inferred from the port pattern (low local port, ephemeral remote port) |
+| `PrivilegeRisks.csv` | Non-SYSTEM parents starting SYSTEM-context processes, with raw integrity-level values included |
+| `Rootkits.csv` | `.sys` module loads from outside the standard driver locations |
+| `SchTasks.csv`, `NewServices.csv` | Derived from `schtasks` / `sc` / PowerShell command lines |
+| `app-inventory.csv` | XQL `host_inventory_applications` preset; needs the Host Insights add-on |
+
+#### Query Quota
+
+XQL API queries consume Cortex query quota, and at most four run in parallel per tenant (the script runs them one at a time). The remaining quota and per-query cost are recorded in `chain_of_custody.json`. On a large tenant use a shorter `--days` window, or `--only`. The summary logs a quota-remaining figure when Cortex reports one.
 
 ---
 
@@ -230,9 +304,41 @@ Audit Events              : Read
 
 ---
 
+### Cortex XDR — Generating an API Key
+
+If you only have username/password/MFA access to the Cortex XDR console:
+
+#### Step 1: Create the API Key
+
+1. Log in to the Cortex XDR console and complete MFA.
+2. Go to **Settings** → **Configurations** → **Integrations** → **API Keys**.
+3. Click **New Key**.
+4. Choose the **Security Level**:
+   - **Standard** — the key is sent as-is in the `Authorization` header (use `--auth-type standard`).
+   - **Advanced** — each request is signed with a nonce and timestamp (use `--auth-type advanced`).
+5. Set an expiration that covers the assessment, and a **Role** of **Instance Administrator** (required to run XQL API queries), or a custom role permitting XQL queries, endpoint read and audit-log read.
+6. Click **Generate** and **copy the key immediately** — it is shown only once.
+
+#### Step 2: Get the Key ID and Tenant FQDN
+
+| Information Needed | Where to Find It |
+|--------------------|------------------|
+| **API Key ID** | The **ID** column of the API Keys table |
+| **Tenant FQDN** | Right-click the **Copy API URL** action on the API Keys page; the host looks like `api-acme.xdr.us.paloaltonetworks.com`. Pass it to `--fqdn` with or without the `api-` prefix |
+
+#### Other Requirements
+
+| Item | Needed for |
+|------|------------|
+| Cortex XDR license | All collection |
+| Host Insights add-on | `app-inventory.csv` only. Without it that file is reported as failed in the manifest and can be exported manually from the console |
+| Available XQL query quota | All XQL queries |
+
+---
+
 ## Output Files
 
-Both scripts generate:
+All scripts generate:
 
 1. **Individual CSV files** for each query category (LVL1–LVL5)
 2. **Inventory exports:**
@@ -255,7 +361,7 @@ Both scripts generate:
 
 ## Analysis Workflow
 
-1. **Run the appropriate script** for your tenant type (S1 or CS)
+1. **Run the appropriate script** for your tenant type (S1, CS or Cortex)
 2. **Review the chain-of-custody manifest** for collection status and any errors
 3. **Add any manual exports** if required (e.g., Entra ID data)
 4. **Use `AnalysisPrompt.txt`** with your preferred AI assistant to generate the assessment report
@@ -297,11 +403,13 @@ pip install requests
 
 | Issue | Solution |
 |-------|----------|
-| **401 Unauthorized** | Token expired or invalid — regenerate API token/credentials |
+| **401 Unauthorized** | Token expired or invalid — regenerate API token/credentials. Cortex: also check `--auth-type` matches the key's security level and the key ID is correct |
 | **403 Forbidden** | Insufficient API scope permissions — verify required scopes |
 | **Connection timeout** | Check network connectivity and firewall rules |
 | **Rate limiting (429)** | Wait and retry — scripts include automatic backoff |
 | **Empty results** | Verify date range and check if data exists for the query |
+| **Cortex: one XQL query fails** | The `note` for that file in `chain_of_custody.json` holds the reason (syntax, dataset access, quota). Fix the query in `cortex_query_runner.py` and re-run just that file with `--only` |
+| **Cortex: `app-inventory.csv` fails** | The Host Insights add-on is not licensed or enabled — export Host Inventory → Applications from the console |
 
 ### Token Refresh (CrowdStrike)
 
@@ -309,11 +417,12 @@ CrowdStrike OAuth2 tokens have a 30-minute TTL. The script automatically refresh
 
 ### Logging
 
-Both scripts output detailed logging to stdout. Redirect to a file for troubleshooting:
+All scripts output detailed logging to stdout. Redirect to a file for troubleshooting:
 
 ```bash
 python s1_query_runner.py --url ... --token ... 2>&1 | tee collection.log
 python CS_query_runner.py --client-id ... --client-secret ... 2>&1 | tee collection.log
+python cortex_query_runner.py --fqdn ... --api-key ... --api-key-id ... 2>&1 | tee collection.log
 ```
 
 ---
