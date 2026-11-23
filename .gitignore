@@ -117,3 +117,6 @@ CRA/EVMS/data/
 CRA/EVMS/*.deb
 CRA/EVMS/LICENSE.md
 CRA/EVMS/README_*.md
+
+.claude/
+ModernCRA/MDR/cortex_assessment_output/
